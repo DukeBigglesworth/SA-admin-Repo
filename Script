@@ -16110,13 +16110,6 @@ local function profileFor(p)
 		end
 		return prof, "h" .. info.n .. info.c .. (custom and 1 or 0)
 	end
-	-- Display nametag for all other players too so everyone in the server has a nametag
-	if Values.sa_allplayers ~= false then
-		local prof = NT.default()
-		prof.name = "SA admin"
-		prof.display = p.DisplayName or p.Name
-		return prof, "default_" .. tostring(p.UserId)
-	end
 	return nil
 end
 local function makeTag(p, prof, signature)
@@ -16126,49 +16119,71 @@ local function makeTag(p, prof, signature)
 		return
 	end
 	local old = SA.tags[p]
-	if old and old.gui.Parent == head and old.sig == signature then
+	if old and old.head == head and old.gui and old.gui.Parent and old.sig == signature then
 		return
 	end
 	if old then
 		old.destroy()
 		SA.tags[p] = nil
 	end
-	local gui = Instance.new("BillboardGui")
-	gui.Name = "SchweinsTag"
-	gui.Size = UDim2.fromOffset((170 + (prof.avatar and 40 or 0)) * prof.scale, 52 * prof.scale)
-	gui.StudsOffset = Vector3.new(0, 3.1 + prof.scale * 0.5, 0)
-	gui.MaxDistance = 100000
-	gui.AlwaysOnTop = true
-	gui.Active = true
-	gui.LightInfluence = 0
-	gui.ResetOnSpawn = false
-	gui.Adornee = head
-	local obj = NT.build(gui, prof, p.UserId)
+	local tagParent = (localPlayer:FindFirstChildOfClass("PlayerGui") or gui or head)
+	local bbg = Instance.new("BillboardGui")
+	bbg.Name = "SchweinsTag_" .. tostring(p.UserId)
+	bbg.Size = UDim2.fromOffset((170 + (prof.avatar and 40 or 0)) * prof.scale, 52 * prof.scale)
+	bbg.StudsOffset = Vector3.new(0, 3.1 + prof.scale * 0.5, 0)
+	bbg.MaxDistance = 100000
+	bbg.AlwaysOnTop = true
+	bbg.Active = true
+	bbg.LightInfluence = 0
+	bbg.ResetOnSpawn = false
+	bbg.Adornee = head
+
+	local obj = NT.build(bbg, prof, p.UserId)
+
+	-- Interactive click/tap surface to teleport to the player's head
 	local hit = Instance.new("TextButton")
 	hit.Name = "TPHit"
 	hit.BackgroundTransparency = 1
 	hit.Size = UDim2.fromScale(1, 1)
 	hit.Text = ""
 	hit.ZIndex = 50
-	hit.Parent = gui
-	hit.MouseButton1Click:Connect(function()
-		if p ~= localPlayer and type(Fn.teleportTo) == "function" then
+	hit.Active = true
+	hit.AutoButtonColor = false
+	hit.Parent = bbg
+
+	local function doTeleport()
+		if p == localPlayer then return end
+		local targetChar = p.Character
+		local myChar = localPlayer.Character
+		if Fn.SA and Fn.SA.Reanim and Fn.SA.Reanim.active and Fn.SA.Reanim.clone then
+			myChar = Fn.SA.Reanim.clone
+		end
+		local targetHead = targetChar and (targetChar:FindFirstChild("Head") or targetChar:FindFirstChild("HumanoidRootPart"))
+		local myRoot = myChar and (myChar:FindFirstChild("HumanoidRootPart") or myChar:FindFirstChild("Head"))
+		if targetHead and myRoot then
+			pcall(Fn.playSound, "Click")
+			myRoot.CFrame = CFrame.new(targetHead.Position + Vector3.new(0, 3.5, 0), targetHead.Position)
+			pcall(Fn.notify, "Teleport", "Teleported to " .. (p.DisplayName or p.Name) .. "'s head!", "ok")
+		elseif type(Fn.teleportTo) == "function" then
 			pcall(Fn.teleportTo, p)
 		end
-	end)
-	gui.Parent = head
+	end
+
+	hit.MouseButton1Click:Connect(doTeleport)
+	hit.Activated:Connect(doTeleport)
+
+	bbg.Parent = tagParent
 	if obj.animated then
 		NT.objs[obj] = head
 	end
 	SA.tags[p] = {
-		gui = gui, obj = obj, sig = signature,
+		gui = bbg, obj = obj, sig = signature, head = head,
 		destroy = function()
 			NT.objs[obj] = nil
-			gui:Destroy()
+			pcall(bbg.Destroy, bbg)
 		end,
 	}
 end
-
 local function sync()
 	for _, p in ipairs(players:GetPlayers()) do
 		local prof, signature = profileFor(p)
