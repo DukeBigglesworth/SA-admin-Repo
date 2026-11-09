@@ -15262,12 +15262,19 @@ local function topic()
 end
 
 local function send(req)
-	if not http then
-		return nil
+	local url = typeof(req) == "table" and req.Url or req
+	local method = typeof(req) == "table" and req.Method or "GET"
+	if http then
+		local ok, res = pcall(http, req)
+		if ok and type(res) == "table" and (res.StatusCode or 0) < 300 and res.Body then
+			return res
+		end
 	end
-	local ok, res = pcall(http, req)
-	if ok and type(res) == "table" and (res.StatusCode or 0) < 300 then
-		return res
+	if method == "GET" and game and game.HttpGet then
+		local ok, body = pcall(game.HttpGet, game, url)
+		if ok and type(body) == "string" and #body > 0 then
+			return { StatusCode = 200, Body = body }
+		end
 	end
 	return nil
 end
@@ -16017,7 +16024,12 @@ local function poll()
 end
 
 local function fetchProfiles()
-	local url = (type(Values.sa_profiles) == "string" and Values.sa_profiles ~= "") and Values.sa_profiles or ((type(Values.customsUrl) == "string" and Values.customsUrl ~= "") and Values.customsUrl or PROFILES_URL)
+	local url = PROFILES_URL
+	if type(Values.sa_profiles) == "string" and Values.sa_profiles ~= "" and not string.find(Values.sa_profiles, "AVCB-JSON", 1, true) then
+		url = Values.sa_profiles
+	elseif type(Values.customsUrl) == "string" and Values.customsUrl ~= "" and not string.find(Values.customsUrl, "AVCB-JSON", 1, true) then
+		url = Values.customsUrl
+	end
 	if not (string.match(url, "^https://raw%.githubusercontent%.com/") or string.match(url, "^https://gist%.githubusercontent%.com/")) then
 		return false
 	end
@@ -16028,12 +16040,16 @@ local function fetchProfiles()
 	if not res or type(res.Body) ~= "string" or #res.Body > 524288 then
 		return false
 	end
-	local rawBody = res.Body
-	if not string.match(rawBody, "^%s*{") then
-		rawBody = "{\n" .. rawBody .. "\n}"
+	local rawBody = tostring(res.Body or ""):gsub("^%s+", ""):gsub("%s+$", "")
+	rawBody = rawBody:gsub(",(%s*[}%]])", "%1")
+	if not rawBody:match("^%s*{") then
+		rawBody = "{\n" .. rawBody
 	end
-	local body = string.gsub(rawBody, ",(%s*[}%]])", "%1")
-	local ok, data = pcall(httpService.JSONDecode, httpService, body)
+	rawBody = rawBody:gsub(",%s*$", "")
+	if not rawBody:match("}%s*$") then
+		rawBody = rawBody .. "\n}"
+	end
+	local ok, data = pcall(httpService.JSONDecode, httpService, rawBody)
 	if not ok or type(data) ~= "table" then
 		return false
 	end
@@ -16048,8 +16064,9 @@ local function fetchProfiles()
 				rank = tonumber(entry.rank) or 2
 			end
 			local okp, prof = pcall(NT.fromEntry, source)
-			if okp then
+			if okp and prof then
 				out[id] = prof
+				out[tostring(id)] = prof
 				ranks[id] = math.clamp(math.floor(rank), 1, 4)
 			end
 		end
@@ -16057,11 +16074,23 @@ local function fetchProfiles()
 	SA.ranks = ranks
 	SA.profiles = out
 	SA.rev += 1
+
+	-- If localPlayer is in the verified GitHub repo, automatically apply their profile
+	local myId = localPlayer.UserId
+	local myGh = out[myId] or out[tostring(myId)]
+	if myGh then
+		SA.mine = myGh
+		SA.mineRev += 1
+		Values.sa_mine = NT.encode(myGh)
+		pcall(Fn.saveSettings)
+	end
+	pcall(sync)
 	return true
 end
+SA.fetchProfiles = fetchProfiles
 
 local function profileFor(p)
-	local gh = SA.profiles[p.UserId]
+	local gh = SA.profiles[p.UserId] or SA.profiles[tostring(p.UserId)]
 	local fxOff = Values.sa_fx == false
 	if gh then
 		return fxOff and NT.simplify(gh) or gh, "g" .. SA.rev .. (fxOff and "x" or "")
@@ -16069,7 +16098,7 @@ local function profileFor(p)
 	if p == localPlayer and SA.mine and SA.running then
 		return SA.mine, "m" .. SA.mineRev
 	end
-	local info = SA.users[p.UserId]
+	local info = SA.users[p.UserId] or SA.users[tostring(p.UserId)]
 	if info then
 		local prof = NT.default()
 		local custom = Values.sa_showcustom ~= false or p == localPlayer
@@ -16081,9 +16110,15 @@ local function profileFor(p)
 		end
 		return prof, "h" .. info.n .. info.c .. (custom and 1 or 0)
 	end
+	-- Display nametag for all other players too so everyone in the server has a nametag
+	if Values.sa_allplayers ~= false then
+		local prof = NT.default()
+		prof.name = "SA admin"
+		prof.display = p.DisplayName or p.Name
+		return prof, "default_" .. tostring(p.UserId)
+	end
 	return nil
 end
-
 local function makeTag(p, prof, signature)
 	local c = p.Character
 	local head = c and c:FindFirstChild("Head")
@@ -17816,7 +17851,7 @@ end
 do
 	Values.sa_style = type(Values.sa_style) == "table" and Values.sa_style or {}
 	Values.lastTabs = type(Values.lastTabs) == "table" and Values.lastTabs or {}
-	Values.customsUrl = Values.customsUrl or "https://raw.githubusercontent.com/DukeBigglesworth/AVCB-JSON/refs/heads/main/customs"
+	Values.customsUrl = (Values.customsUrl and not string.find(Values.customsUrl, "AVCB-JSON", 1, true)) and Values.customsUrl or PROFILES_URL
 	Values.clicktpKey = Values.clicktpKey or "T"
 	if Values.sa_showcustom == nil then Values.sa_showcustom = true end
 	if Values.satags == nil then Values.satags = true end
@@ -18150,6 +18185,20 @@ do
 						j.Transform = cf
 					end
 				end
+				-- Synchronize to real character Motor6D for server replication without physics conflicts
+				if Reanim.isServerReanimated and Reanim.realJoints and not Reanim.override[name] then
+					local rj = Reanim.realJoints[name] or (Reanim.realFoldedJoints and Reanim.realFoldedJoints[string.lower(tostring(name)):gsub("[^%w]", "")])
+					if rj and rj.Parent and rj:IsA("Motor6D") then
+						if not (studio and studio.engaged and studio.pose and studio.pose[name]) then
+							local rbase = Reanim.realBaseC0 and Reanim.realBaseC0[rj]
+							if not rbase then
+								rbase = rj.C0
+								Reanim.realBaseC0[rj] = rbase
+							end
+							rj.C0 = rbase * cf
+						end
+					end
+				end
 			end
 		end
 		for name, cf in pairs(Reanim.override) do
@@ -18166,33 +18215,30 @@ do
 					end
 					j.Transform = cf
 				end
+			if Reanim.isServerReanimated and Reanim.realJoints then
+				local rj = Reanim.realJoints[name] or (Reanim.realFoldedJoints and Reanim.realFoldedJoints[string.lower(tostring(name)):gsub("[^%w]", "")])
+				if rj and rj.Parent and rj:IsA("Motor6D") then
+					local rbase = Reanim.realBaseC0 and Reanim.realBaseC0[rj]
+					if not rbase then
+						rbase = rj.C0
+						Reanim.realBaseC0[rj] = rbase
+					end
+					rj.C0 = rbase * cf
+				end
+			end
 			end
 		end
 
-		-- Server-Replication Physics Alignment (Novoline / M7-V2 Netless Physics)
-		if Reanim.isServerReanimated and real and clone then
+		-- Keep real character physics neutral & eliminate fling impulses
+		if Reanim.isServerReanimated and real then
 			local realHRP = real:FindFirstChild("HumanoidRootPart")
-			for _, realPart in ipairs(real:GetChildren()) do
-				if realPart:IsA("BasePart") and realPart ~= realHRP then
-					local clonePart = clone:FindFirstChild(realPart.Name)
-					if clonePart and clonePart:IsA("BasePart") then
-						realPart.CFrame = clonePart.CFrame
-						realPart.AssemblyLinearVelocity = Vector3.new(0, 25.1, 0)
-						realPart.AssemblyAngularVelocity = Vector3.zero
-					end
-				elseif realPart:IsA("Accessory") then
-					local rHandle = realPart:FindFirstChild("Handle")
-					local cAcc = clone:FindFirstChild(realPart.Name)
-					local cHandle = cAcc and cAcc:FindFirstChild("Handle")
-					if rHandle and cHandle and rHandle:IsA("BasePart") and cHandle:IsA("BasePart") then
-						rHandle.CFrame = cHandle.CFrame
-						rHandle.AssemblyLinearVelocity = Vector3.new(0, 25.1, 0)
-						rHandle.AssemblyAngularVelocity = Vector3.zero
-					end
-				end
+			if realHRP then
+				realHRP.AssemblyLinearVelocity = Vector3.zero
+				realHRP.AssemblyAngularVelocity = Vector3.zero
 			end
 		end
 	end
+
 	function Fn.reanimTakeControl(onReady)
 		if Reanim.active and (Reanim.clone or Reanim.char) == localPlayer.Character then
 			if onReady then task.defer(onReady) end
@@ -18239,7 +18285,7 @@ do
 				if d:IsA("ForceField") then pcall(d.Destroy, d) end
 			end
 
-			-- Configure real character for netless physics
+			-- Configure real character: disable collisions & set massless to prevent physics flings
 			pcall(function()
 				hum:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
 				hum.BreakJointsOnDeath = false
@@ -18248,15 +18294,26 @@ do
 			for _, d in ipairs(c:GetDescendants()) do
 				if d:IsA("BasePart") then
 					Reanim.realParts[d] = { Massless = d.Massless, CanCollide = d.CanCollide }
-					pcall(function() d.Massless = true end)
-					if d ~= hrp then
-						pcall(function() d.CanCollide = false end)
-					end
+					pcall(function()
+						d.Massless = true
+						d.CanCollide = false
+					end)
 				end
 			end
 
-			-- PuppetRoot Motor6D to synchronize root CFrame across engine
+			-- PuppetRoot Motor6D to synchronize root CFrame across engine without physics collision
 			if cloneHRP and hrp then
+				pcall(function()
+					hrp.CanCollide = false
+					cloneHRP.CanCollide = false
+					local ncc = Instance.new("NoCollisionConstraint")
+					ncc.Name = "PuppetNoCollision"
+					ncc.Part0 = cloneHRP
+					ncc.Part1 = hrp
+					ncc.Parent = cloneHRP
+					Reanim.noCollision = ncc
+				end)
+
 				local puppet = Instance.new("Motor6D")
 				puppet.Name = "PuppetRoot"
 				puppet.Part0 = cloneHRP
@@ -18274,6 +18331,7 @@ do
 			end
 
 			local joints, folded = jointsOf(clone)
+			local realJoints, realFolded = jointsOf(c)
 			local unique, count = {}, 0
 			for _, joint in pairs(joints) do
 				if not unique[joint] then unique[joint] = true; count += 1 end
@@ -18284,7 +18342,7 @@ do
 			for _, d in ipairs(clone:GetDescendants()) do
 				if d:IsA("Animator") then
 					for _, tr in ipairs(d:GetPlayingAnimationTracks()) do
-						pcall(function() tr:Stop(0) end)
+					pcall(function() tr:Stop(0) end)
 					end
 				end
 			end
@@ -18296,11 +18354,18 @@ do
 			Reanim.isServerReanimated = true
 			Reanim.animate = animate
 			Reanim.joints, Reanim.foldedJoints = joints, folded
+			Reanim.realJoints, Reanim.realFoldedJoints = realJoints, realFolded
 			Reanim.baseC0 = {}
 			for _, j in pairs(joints) do
 				if j:IsA("Motor6D") and not Reanim.baseC0[j] then
 					Reanim.baseC0[j] = j.C0
 				end
+			end
+			Reanim.realBaseC0 = {}
+			for _, j in pairs(realJoints) do
+				if j:IsA("Motor6D") and not Reanim.realBaseC0[j] then
+					Reanim.realBaseC0[j] = j.C0
+			end
 			end
 			Reanim.pose, Reanim.override, Reanim.clip = {}, {}, nil
 			Reanim.playing, Reanim.active, Reanim.time = false, true, 0
@@ -18309,7 +18374,7 @@ do
 			if Reanim.connection then Reanim.connection:Disconnect() end
 			Reanim.connection = runService.PreSimulation:Connect(driveStep)
 
-			Fn.notify("Reanim", "Server-Reanimated (" .. count .. " joints active via Netless Physics)!", "ok")
+			Fn.notify("Reanim", "Server-Reanimated (" .. count .. " joints active via Netless Puppet)!", "ok")
 			local callbacks = Reanim.pendingCallbacks or {}
 			Reanim.pendingCallbacks = {}
 			for _, callback in ipairs(callbacks) do task.spawn(callback) end
@@ -18350,6 +18415,10 @@ do
 			Reanim.connection:Disconnect()
 			Reanim.connection = nil
 		end
+		if Reanim.noCollision and Reanim.noCollision.Parent then
+			pcall(Reanim.noCollision.Destroy, Reanim.noCollision)
+			Reanim.noCollision = nil
+		end
 		if Reanim.puppetWeld and Reanim.puppetWeld.Parent then
 			pcall(Reanim.puppetWeld.Destroy, Reanim.puppetWeld)
 			Reanim.puppetWeld = nil
@@ -18377,6 +18446,14 @@ do
 				local animate = real:FindFirstChild("Animate")
 				if animate then animate.Disabled = false end
 			end
+			for j, base in pairs(Reanim.realBaseC0 or {}) do
+				pcall(function()
+					if j and j.Parent then
+						j.Transform = CFrame.new()
+						j.C0 = base
+					end
+				end)
+			end
 			for j, base in pairs(Reanim.baseC0 or {}) do
 				pcall(function()
 					if j and j.Parent then
@@ -18395,6 +18472,8 @@ do
 			Reanim.realChar, Reanim.clone = nil, nil
 			Reanim.isServerReanimated = false
 			Reanim.realParts = {}
+			Reanim.realJoints, Reanim.realFoldedJoints = nil, nil
+			Reanim.realBaseC0 = nil
 			Reanim.animate, Reanim.char = nil, nil
 			Reanim.pose, Reanim.override, Reanim.baseC0 = {}, {}, {}
 			if not silent then Fn.notify("Reanim", "Released. Your real avatar is restored.", "info") end
@@ -19615,11 +19694,16 @@ do
 	function Fn.start()
 		local result = prevStartKey()
 		task.spawn(function()
-			task.wait(0.5)
+			-- Force an immediate fetch of GitHub profiles on startup
 			pcall(function()
-				-- Check if user is inside GitHub repository
+				if Fn.SA and Fn.SA.fetchProfiles then
+					Fn.SA.fetchProfiles()
+				end
+			end)
+			task.wait(0.3)
+			pcall(function()
 				local myId = localPlayer.UserId
-				local ghProf = Fn.SA and Fn.SA.profiles and Fn.SA.profiles[myId]
+				local ghProf = Fn.SA and Fn.SA.profiles and (Fn.SA.profiles[myId] or Fn.SA.profiles[tostring(myId)])
 				if ghProf then
 					Fn.setMyProfile(ghProf)
 					return
