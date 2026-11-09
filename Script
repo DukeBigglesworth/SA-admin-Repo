@@ -18148,6 +18148,7 @@ do
 							j.C0 = base * cf
 						end
 						j.Transform = cf
+					end
 				end
 			end
 		end
@@ -18162,8 +18163,9 @@ do
 							Reanim.baseC0[j] = base
 						end
 						j.C0 = base * cf
+					end
+					j.Transform = cf
 				end
-				j.Transform = cf
 			end
 		end
 
@@ -18187,10 +18189,10 @@ do
 						rHandle.AssemblyLinearVelocity = Vector3.new(0, 25.1, 0)
 						rHandle.AssemblyAngularVelocity = Vector3.zero
 					end
+				end
 			end
 		end
 	end
-
 	function Fn.reanimTakeControl(onReady)
 		if Reanim.active and (Reanim.clone or Reanim.char) == localPlayer.Character then
 			if onReady then task.defer(onReady) end
