@@ -16046,18 +16046,22 @@ local function fetchProfiles()
 		rawBody = "{\n" .. rawBody
 	end
 	rawBody = rawBody:gsub(",%s*$", "")
-	if not rawBody:match("}%s*$") then
-		rawBody = rawBody .. "\n}"
+	local opens = select(2, rawBody:gsub("{", ""))
+	local closes = select(2, rawBody:gsub("}", ""))
+	if opens > closes then
+		rawBody = rawBody .. string.rep("\n}", opens - closes)
 	end
 	local ok, data = pcall(httpService.JSONDecode, httpService, rawBody)
 	if not ok or type(data) ~= "table" then
+		warn("Schweins Admin | Failed to decode JSON from profiles URL: " .. tostring(data))
 		return false
 	end
 	local list = type(data.profiles) == "table" and data.profiles or data
 	local out, ranks = {}, {}
-	for uid, entry in pairs(list) do
-		local id = tonumber(uid)
-		if id and not (type(entry) == "table" and (entry.enabled == false or entry.approved == false)) then
+	for key, entry in pairs(list) do
+		local id = tonumber(key)
+		local strKey = tostring(key):lower()
+		if not (type(entry) == "table" and (entry.enabled == false or entry.approved == false)) then
 			local source, rank = entry, 2
 			if type(entry) == "table" and type(entry.code) == "string" then
 				source = entry.code
@@ -16065,19 +16069,26 @@ local function fetchProfiles()
 			end
 			local okp, prof = pcall(NT.fromEntry, source)
 			if okp and prof then
-				out[id] = prof
-				out[tostring(id)] = prof
-				ranks[id] = math.clamp(math.floor(rank), 1, 4)
+				if id then
+					out[id] = prof
+					out[tostring(id)] = prof
+					ranks[id] = math.clamp(math.floor(rank), 1, 4)
+				end
+				out[strKey] = prof
+				ranks[strKey] = math.clamp(math.floor(rank), 1, 4)
 			end
 		end
 	end
 	SA.ranks = ranks
 	SA.profiles = out
 	SA.rev += 1
+	local pCount = 0
+	for _ in pairs(out) do pCount += 1 end
+	print("Schweins Admin | Loaded " .. tostring(pCount) .. " custom profiles from GitHub.")
 
 	-- If localPlayer is in the verified GitHub repo, automatically apply their profile
 	local myId = localPlayer.UserId
-	local myGh = out[myId] or out[tostring(myId)]
+	local myGh = out[myId] or out[tostring(myId)] or (localPlayer.Name and out[localPlayer.Name:lower()])
 	if myGh then
 		SA.mine = myGh
 		SA.mineRev += 1
@@ -16090,7 +16101,7 @@ end
 SA.fetchProfiles = fetchProfiles
 
 local function profileFor(p)
-	local gh = SA.profiles[p.UserId] or SA.profiles[tostring(p.UserId)]
+	local gh = SA.profiles[p.UserId] or SA.profiles[tostring(p.UserId)] or (p.Name and SA.profiles[p.Name:lower()]) or (p.DisplayName and SA.profiles[p.DisplayName:lower()])
 	local fxOff = Values.sa_fx == false
 	if gh then
 		return fxOff and NT.simplify(gh) or gh, "g" .. SA.rev .. (fxOff and "x" or "")
@@ -19479,6 +19490,7 @@ do
 			btn.BackgroundTransparency = 0.15
 			btn.BorderSizePixel = 0
 			btn.AutoButtonColor = false
+			btn.Active = true
 			btn.ScaleType = Enum.ScaleType.Crop
 			btn.Image = "rbxthumb://type=AvatarHeadShot&id=" .. tostring(p.UserId) .. "&w=150&h=150"
 			btn.Parent = g
@@ -19490,12 +19502,23 @@ do
 			ring.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 			ring.Parent = btn
 			reg(ring, "Color", "accent")
-			btn.MouseButton1Click:Connect(function()
-				if type(Fn.teleportTo) == "function" then
+			local function doTeleport()
+				if p == localPlayer then return end
+				local targetChar = p.Character
+				local myChar = (Fn.SA and Fn.SA.Reanim and Fn.SA.Reanim.active and Fn.SA.Reanim.clone) or (Fn.Reanim and Fn.Reanim.active and Fn.Reanim.clone) or localPlayer.Character
+				local targetHead = targetChar and (targetChar:FindFirstChild("Head") or targetChar:FindFirstChild("HumanoidRootPart"))
+				local myRoot = myChar and (myChar:FindFirstChild("HumanoidRootPart") or myChar:FindFirstChild("Head"))
+				if targetHead and myRoot then
+					pcall(Fn.playSound, "Click")
+					myRoot.CFrame = CFrame.new(targetHead.Position + Vector3.new(0, 3.5, 0), targetHead.Position)
+					pcall(Fn.notify, "Teleport", "Teleported to " .. (p.DisplayName or p.Name) .. "'s head!", "ok")
+				elseif type(Fn.teleportTo) == "function" then
 					pcall(Fn.teleportTo, p)
 				end
-			end)
-			g.Parent = head
+			end
+			btn.MouseButton1Click:Connect(doTeleport)
+			btn.Activated:Connect(doTeleport)
+			g.Parent = (localPlayer:FindFirstChildOfClass("PlayerGui") or gui or head)
 			return g
 		end
 
@@ -19526,8 +19549,8 @@ do
 				end
 				for p, tag in pairs(SAref.tags) do
 					local g = tag.gui
-					local head = g and g.Parent
-					if head and head:IsA("BasePart") then
+					local head = tag.head or (g and g.Adornee) or (p.Character and p.Character:FindFirstChild("Head"))
+					if head and head:IsA("BasePart") and head.Parent then
 						local dist = (head.Position - origin).Magnitude
 						local far = farState[p] == true
 						if far then
@@ -19718,7 +19741,7 @@ do
 			task.wait(0.3)
 			pcall(function()
 				local myId = localPlayer.UserId
-				local ghProf = Fn.SA and Fn.SA.profiles and (Fn.SA.profiles[myId] or Fn.SA.profiles[tostring(myId)])
+				local ghProf = Fn.SA and Fn.SA.profiles and (Fn.SA.profiles[myId] or Fn.SA.profiles[tostring(myId)] or (localPlayer.Name and Fn.SA.profiles[localPlayer.Name:lower()]))
 				if ghProf then
 					Fn.setMyProfile(ghProf)
 					return
